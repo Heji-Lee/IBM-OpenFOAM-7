@@ -1,0 +1,214 @@
+/*---------------------------------------------------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     |
+    \\  /    A nd           | Copyright (C) 2014-2018 OpenFOAM Foundation
+     \\/     M anipulation  |
+-------------------------------------------------------------------------------
+License
+    This file is part of OpenFOAM.
+
+    OpenFOAM is free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    OpenFOAM is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+    FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+    for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with OpenFOAM.  If not, see <http://www.gnu.org/licenses/>.
+
+\*---------------------------------------------------------------------------*/
+
+#include "immersedBoundaryFvPatch.H"
+
+// * * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * //
+
+template<class Type>
+Foam::tmp<Foam::FieldField<Foam::Field, Type> >
+Foam::immersedBoundaryFvPatch::sendAndReceive
+(
+    const Field<Type>& psi
+) const
+{
+    tmp<FieldField<Field, Type> > tprocPsi
+    (
+        new FieldField<Field, Type>(Pstream::nProcs())
+    );
+    FieldField<Field, Type>& procPsi = tprocPsi.ref();
+
+    forAll (procPsi, procI)
+    {
+        procPsi.set
+        (
+            procI,
+            new Field<Type>
+            (
+                ibProcCentres()[procI].size(),
+                pTraits<Type>::zero
+            )
+        );
+    }
+
+    if (Pstream::parRun())
+    {
+        // Send
+        for (label procI = 0; procI < Pstream::nProcs(); procI++)
+        {
+            if (procI != Pstream::myProcNo())
+            {
+                // Do not send empty lists
+                if (!ibProcCells()[procI].empty())
+                {
+                    Field<Type> curPsi(psi, ibProcCells()[procI]);
+
+                    // Parallel data exchange
+                    OPstream toProc
+                    (
+                        Pstream::commsTypes::blocking,
+                        procI,
+                        curPsi.size()*sizeof(Type)
+                    );
+
+                    toProc << curPsi;
+                }
+            }
+        }
+
+        // Receive
+        for (label procI = 0; procI < Pstream::nProcs(); procI++)
+        {
+            if (procI != Pstream::myProcNo())
+            {
+                // Do not receive empty lists
+                if (!procPsi[procI].empty())
+                {
+                    // Parallel data exchange
+                    IPstream fromProc
+                    (
+                        Pstream::commsTypes::blocking,
+                        procI,
+                        procPsi[procI].size()*sizeof(Type)
+                    );
+
+                    fromProc >> procPsi[procI];
+                }
+            }
+        }
+    }
+
+    return tprocPsi;
+}
+
+
+template<class Type>
+Foam::tmp<Foam::Field<Type> >
+Foam::immersedBoundaryFvPatch::toIbPoints
+(
+    const Field<Type>& triValues
+) const
+{
+    if (triValues.size() != surface().size())
+    {
+        FatalErrorIn(__PRETTY_FUNCTION__)
+            << "Field size does not correspond to size of immersed boundary "
+            << "triangulated surface for patch " << name() << nl
+            << "Field size = " << triValues.size()
+            << " surface size = " << surface().size()
+            << abort(FatalError);
+    }
+
+    const labelList& ibc = ibCells();
+
+    tmp<Field<Type> > tIbPsi
+    (
+        new Field<Type>(ibc.size(), pTraits<Type>::zero)
+    );
+    Field<Type>& ibPsi = tIbPsi.ref();
+
+    const labelList& hf = hitFaces();
+
+    // Assuming triSurface data is on triangles
+    forAll (ibPsi, cellI)
+    {
+        ibPsi[cellI] = triValues[hf[cellI]];
+    }
+
+    return tIbPsi;
+}
+
+
+template<class Type>
+Foam::tmp<Foam::Field<Type> >
+Foam::immersedBoundaryFvPatch::toIbPoints
+(
+    const tmp<Field<Type> >& ttriValues
+) const
+{
+    tmp<Field<Type> > tint = toIbPoints(ttriValues());
+    ttriValues.clear();
+    return tint;
+
+}
+
+
+template<class Type>
+Foam::tmp<Foam::Field<Type> >
+Foam::immersedBoundaryFvPatch::toTriFaces
+(
+    const Field<Type>& ibValues
+) const
+{
+    if (ibValues.size() != ibCells().size())
+    {
+        FatalErrorIn(__PRETTY_FUNCTION__)
+            << "Field size does not correspond to size of IB points "
+            << "triangulated surface for patch " << name() << nl
+            << "Field size = " << size()
+            << " IB points size = " << ibCells().size()
+            << abort(FatalError);
+    }
+
+    const labelListList& ctfAddr = cellsToTriAddr();
+    const scalarListList& ctfWeights = cellsToTriWeights();
+
+    tmp<Field<Type> > tIbPsi
+    (
+        new Field<Type>(ctfAddr.size(), pTraits<Type>::zero)
+    );
+    Field<Type>& ibPsi = tIbPsi.ref();
+
+    // Do interpolation
+    forAll (ctfAddr, triI)
+    {
+        const labelList& curAddr = ctfAddr[triI];
+        const scalarList& curWeights = ctfWeights[triI];
+
+        forAll (curAddr, cellI)
+        {
+            ibPsi[triI] += curWeights[cellI]*ibValues[curAddr[cellI]];
+        }
+    }
+
+    return tIbPsi;
+}
+
+
+template<class Type>
+Foam::tmp<Foam::Field<Type> >
+Foam::immersedBoundaryFvPatch::toTriFaces
+(
+    const tmp<Field<Type> >& tibValues
+) const
+{
+    tmp<Field<Type> > tint = toTriFaces(tibValues());
+    tibValues.clear();
+    return tint;
+
+}
+
+
+// ************************************************************************* //
